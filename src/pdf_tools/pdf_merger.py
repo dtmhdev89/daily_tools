@@ -3,6 +3,7 @@ import PyPDF2
 import os
 from pathlib import Path
 import argparse
+import re
 
 def is_page_blank(page, threshold=100):
     """
@@ -154,6 +155,11 @@ def merge_pdfs_remove_blanks(
         return None
 
 
+def natural_sort_key(s):
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split('([0-9]+)', s)]
+
+
 def list_files_from_folder(folder_path):
     """Get sorted list of PDF files from a folder."""
     pdf_files = sorted(
@@ -161,7 +167,8 @@ def list_files_from_folder(folder_path):
             os.path.join(folder_path, f)
             for f in os.listdir(folder_path)
             if f.lower().endswith('.pdf')
-        ]
+        ],
+        key=natural_sort_key
     )
     return pdf_files
 
@@ -185,7 +192,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-o", "--output",
         type=str,
-        default="merged_document.pdf"
+        default="merged_document.pdf",
         help="Output filename (default: merged_document.pdf)"
     )
 
