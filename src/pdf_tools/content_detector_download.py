@@ -1,6 +1,8 @@
 import os
 import asyncio
 import argparse
+import base64
+import json
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from datetime import datetime
@@ -17,13 +19,30 @@ class NetworkPDFInterceptor:
         """
         self.download_folder = download_folder
         self.intercepted_urls = []
+        self.blob_urls = []
         self.downloaded_files = []
+        self.pdf_links_file = None
         self._create_download_folder()
     
     def _create_download_folder(self):
         """Create download folder if it doesn't exist."""
         Path(self.download_folder).mkdir(parents=True, exist_ok=True)
         print(f"📁 Download folder: {os.path.abspath(self.download_folder)}")
+        
+        # Create links file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.pdf_links_file = os.path.join(self.download_folder, f"pdf_links_{timestamp}.txt")
+    
+    def save_pdf_link(self, url, source_type="network"):
+        """
+        Save PDF link to file.
+        
+        Args:
+            url (str): PDF URL
+            source_type (str): Type of source (network, blob, etc.)
+        """
+        with open(self.pdf_links_file, 'a', encoding='utf-8') as f:
+            f.write(f"[{source_type}] {url}\n")
     
     def get_filename_from_url(self, url, content_disposition=None):
         """
@@ -153,7 +172,6 @@ class NetworkPDFInterceptor:
                 filepath = os.path.join(self.download_folder, filename)
                 
                 # Decode base64 and save
-                import base64
                 pdf_bytes = base64.b64decode(blob_data['data'])
                 
                 with open(filepath, 'wb') as f:
@@ -172,7 +190,173 @@ class NetworkPDFInterceptor:
         
         return None
     
-    async def intercept_website(self, url, wait_time=10, headless=True):
+    async def auto_navigate_pagination(self, page, max_pages=10, navigation_method='auto'):
+        """
+        Automatically navigate through pagination to collect PDF links.
+        
+        Args:
+            page: Playwright page object
+            max_pages (int): Maximum number of pages to navigate
+            navigation_method (str): 'auto', 'next_button', 'page_numbers', 'arrows', 'keyboard'
+            
+        Returns:
+            int: Number of pages navigated
+        """
+        print(f"\n{'='*70}")
+        print(f"📄 Starting pagination navigation (max {max_pages} pages)...")
+        print(f"   Method: {navigation_method}")
+        print(f"{'='*70}\n")
+        
+        pages_visited = 1
+        
+        for page_num in range(2, max_pages + 1):
+            await asyncio.sleep(3)  # Wait for content to load
+            
+            try:
+                navigated = False
+                current_url = page.url
+                
+                # Method 1: Try "Next" button
+                if navigation_method in ['auto', 'next_button']:
+                    next_selectors = [
+                        'button:has-text("Next")',
+                        'a:has-text("Next")',
+                        'button:has-text("next")',
+                        'a:has-text("next")',
+                        'button:has-text(">")',
+                        'a:has-text(">")',
+                        '[aria-label="Next"]',
+                        '[aria-label="next page"]',
+                        '[aria-label="Go to next page"]',
+                        '.next-page',
+                        '.pagination-next',
+                        'button[class*="next"]',
+                        'a[class*="next"]',
+                        'li.next > a',
+                        'li.next > button'
+                    ]
+                    
+                    for selector in next_selectors:
+                        try:
+                            element = await page.query_selector(selector)
+                            if element:
+                                is_disabled = await element.get_attribute('disabled')
+                                aria_disabled = await element.get_attribute('aria-disabled')
+                                class_attr = await element.get_attribute('class') or ''
+                                
+                                if not is_disabled and aria_disabled != 'true' and 'disabled' not in class_attr.lower():
+                                    print(f"🔽 Clicking Next button with selector: {selector}")
+                                    await element.click()
+                                    await page.wait_for_timeout(2000)
+                                    
+                                    # Check if URL changed or content loaded
+                                    new_url = page.url
+                                    if new_url != current_url:
+                                        await page.wait_for_load_state('networkidle', timeout=10000)
+                                    
+                                    navigated = True
+                                    break
+                        except Exception as e:
+                            print(f"   Failed with {selector}: {str(e)[:50]}")
+                            continue
+                
+                # Method 2: Try page numbers
+                if not navigated and navigation_method in ['auto', 'page_numbers']:
+                    page_selectors = [
+                        f'a:has-text("{page_num}")',
+                        f'button:has-text("{page_num}")',
+                        f'[data-page="{page_num}"]',
+                        f'.page-link:has-text("{page_num}")',
+                        f'a.page-number:has-text("{page_num}")',
+                        f'li:has-text("{page_num}") > a',
+                        f'li:has-text("{page_num}") > button'
+                    ]
+                    
+                    for selector in page_selectors:
+                        try:
+                            element = await page.query_selector(selector)
+                            if element:
+                                print(f"🔢 Clicking page number {page_num} with selector: {selector}")
+                                await element.click()
+                                await page.wait_for_timeout(2000)
+                                
+                                new_url = page.url
+                                if new_url != current_url:
+                                    await page.wait_for_load_state('networkidle', timeout=10000)
+                                
+                                navigated = True
+                                break
+                        except Exception as e:
+                            print(f"   Failed with {selector}: {str(e)[:50]}")
+                            continue
+                
+                # Method 3: Try arrow/chevron icons
+                if not navigated and navigation_method in ['auto', 'arrows']:
+                    arrow_selectors = [
+                        '[aria-label="Next page"]',
+                        'button[class*="arrow-right"]',
+                        'button[class*="chevron-right"]',
+                        'a[class*="arrow-right"]',
+                        'a[class*="chevron-right"]',
+                        '.arrow-right',
+                        '.chevron-right',
+                        'svg[class*="arrow-right"]',
+                        'i[class*="arrow-right"]',
+                        'i.fa-arrow-right',
+                        'i.fa-chevron-right'
+                    ]
+                    
+                    for selector in arrow_selectors:
+                        try:
+                            element = await page.query_selector(selector)
+                            if element:
+                                print(f"➡️ Clicking arrow with selector: {selector}")
+                                await element.click()
+                                await page.wait_for_timeout(2000)
+                                
+                                new_url = page.url
+                                if new_url != current_url:
+                                    await page.wait_for_load_state('networkidle', timeout=10000)
+                                
+                                navigated = True
+                                break
+                        except Exception as e:
+                            print(f"   Failed with {selector}: {str(e)[:50]}")
+                            continue
+                
+                # Method 4: Try keyboard navigation (Arrow keys or Page Down)
+                if not navigated and navigation_method in ['auto', 'keyboard']:
+                    try:
+                        print(f"⌨️ Trying keyboard navigation (Arrow Right)...")
+                        await page.keyboard.press('ArrowRight')
+                        await page.wait_for_timeout(2000)
+                        
+                        new_url = page.url
+                        if new_url != current_url:
+                            await page.wait_for_load_state('networkidle', timeout=10000)
+                            navigated = True
+                    except Exception as e:
+                        print(f"   Keyboard navigation failed: {str(e)[:50]}")
+                
+                if navigated:
+                    pages_visited += 1
+                    print(f"✅ Successfully navigated to page {page_num}")
+                    print(f"   Current URL: {page.url}\n")
+                else:
+                    print(f"⚠️ Could not find navigation element. Stopping at page {pages_visited}")
+                    print(f"   You may need to specify a custom selector or use manual navigation\n")
+                    break
+                    
+            except Exception as e:
+                print(f"❌ Navigation error on page {page_num}: {e}")
+                break
+        
+        print(f"\n✅ Pagination complete: Visited {pages_visited} pages\n")
+        return pages_visited
+    
+    async def intercept_website(self, url, wait_time=10, headless=True, 
+                                auto_paginate=False, max_pages=10, 
+                                download_now=True, navigation_method='auto'):
         """
         Open a website and intercept all network requests to detect PDFs.
         
@@ -180,12 +364,15 @@ class NetworkPDFInterceptor:
             url (str): Website URL to visit
             wait_time (int): Time to wait for requests in seconds
             headless (bool): Run browser in headless mode
+            auto_paginate (bool): Automatically navigate pagination
+            max_pages (int): Maximum pages to navigate
+            download_now (bool): Download PDFs immediately or just save links
+            navigation_method (str): Method for pagination navigation
         """
         print(f"\n{'='*70}")
         print(f"🌐 Intercepting network requests from: {url}")
+        print(f"📝 PDF links will be saved to: {self.pdf_links_file}")
         print(f"{'='*70}\n")
-        
-        blob_urls = []
         
         async with async_playwright() as p:
             # Launch browser
@@ -202,8 +389,9 @@ class NetworkPDFInterceptor:
                 # Detect blob URLs
                 if req_url.startswith('blob:'):
                     print(f"🔵 Blob URL detected: {req_url}")
-                    if req_url not in blob_urls:
-                        blob_urls.append(req_url)
+                    if req_url not in self.blob_urls:
+                        self.blob_urls.append(req_url)
+                        self.save_pdf_link(req_url, "blob")
                 else:
                     print(f"🔍 Request: {request.method} {req_url[:100]}...")
             
@@ -220,16 +408,18 @@ class NetworkPDFInterceptor:
                     
                     if resp_url not in self.intercepted_urls:
                         self.intercepted_urls.append(resp_url)
+                        self.save_pdf_link(resp_url, "network")
                         
-                        # Get request headers for download
-                        headers = {}
-                        if 'authorization' in response.request.headers:
-                            headers['Authorization'] = response.request.headers['authorization']
-                        if 'cookie' in response.request.headers:
-                            headers['Cookie'] = response.request.headers['cookie']
-                        
-                        # Download the PDF
-                        self.download_pdf(resp_url, headers)
+                        if download_now:
+                            # Get request headers for download
+                            headers = {}
+                            if 'authorization' in response.request.headers:
+                                headers['Authorization'] = response.request.headers['authorization']
+                            if 'cookie' in response.request.headers:
+                                headers['Cookie'] = response.request.headers['cookie']
+                            
+                            # Download the PDF
+                            self.download_pdf(resp_url, headers)
                 else:
                     # Show other requests (optional, for debugging)
                     if content_type:
@@ -244,19 +434,22 @@ class NetworkPDFInterceptor:
                 print(f"🚀 Loading website...\n")
                 await page.goto(url, wait_until='networkidle', timeout=60000)
                 
-                print(f"\n⏳ Waiting {wait_time} seconds for additional requests...")
-                print(f"   (The browser window will stay open - interact with the page if needed)\n")
-                
-                # Wait for the specified time to catch lazy-loaded requests
+                print(f"\n⏳ Waiting {wait_time} seconds for initial requests...")
                 await asyncio.sleep(wait_time)
                 
+                # Auto-navigate pagination if enabled
+                if auto_paginate:
+                    await self.auto_navigate_pagination(page, max_pages, navigation_method)
+                    print(f"\n⏳ Waiting {wait_time} seconds after pagination...")
+                    await asyncio.sleep(wait_time)
+                
                 # Process any blob URLs found
-                if blob_urls:
+                if self.blob_urls and download_now:
                     print(f"\n{'='*70}")
-                    print(f"🔵 Processing {len(blob_urls)} blob URL(s)...")
+                    print(f"🔵 Processing {len(self.blob_urls)} blob URL(s)...")
                     print(f"{'='*70}")
                     
-                    for i, blob_url in enumerate(blob_urls, 1):
+                    for i, blob_url in enumerate(self.blob_urls, 1):
                         await self.save_blob_as_pdf(page, blob_url, i)
                 
             except Exception as e:
@@ -270,11 +463,13 @@ class NetworkPDFInterceptor:
         print(f"📊 SUMMARY")
         print(f"{'='*70}")
         print(f"PDFs detected: {len(self.intercepted_urls)}")
+        print(f"Blob URLs detected: {len(self.blob_urls)}")
         print(f"PDFs downloaded: {len(self.downloaded_files)}")
+        print(f"Links saved to: {self.pdf_links_file}")
         
-        if self.intercepted_urls:
-            print(f"\n📋 Intercepted PDF URLs:")
-            for i, pdf_url in enumerate(self.intercepted_urls, 1):
+        if self.intercepted_urls or self.blob_urls:
+            print(f"\n📋 All PDF links:")
+            for i, pdf_url in enumerate(self.intercepted_urls + self.blob_urls, 1):
                 print(f"   {i}. {pdf_url}")
         
         if self.downloaded_files:
@@ -294,9 +489,17 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python script.py --url https://example.com
-  python script.py --url https://example.com --wait 30 --headless
-  python script.py --url https://example.com --folder my_pdfs --wait 20
+  # Basic usage
+  python script.py --url "https://example.com"
+  
+  # With pagination (auto-navigate up to 5 pages)
+  python script.py --url "https://example.com" --paginate --max-pages 5
+  
+  # Just collect links, don't download
+  python script.py --url "https://example.com" --paginate --no-download
+  
+  # Full control
+  python script.py --url "https://example.com" --folder my_pdfs --wait 20 --paginate --max-pages 10 --headless
         """
     )
     
@@ -327,6 +530,33 @@ Examples:
         help='Run browser in headless mode (no UI)'
     )
     
+    parser.add_argument(
+        '--paginate',
+        action='store_true',
+        help='Automatically navigate through pagination'
+    )
+    
+    parser.add_argument(
+        '--max-pages',
+        type=int,
+        default=10,
+        help='Maximum pages to navigate (default: 10)'
+    )
+    
+    parser.add_argument(
+        '--no-download',
+        action='store_true',
+        help='Only collect PDF links, do not download them'
+    )
+    
+    parser.add_argument(
+        '--nav-method',
+        type=str,
+        choices=['auto', 'next_button', 'page_numbers', 'arrows', 'keyboard'],
+        default='auto',
+        help='Navigation method for pagination (default: auto)'
+    )
+    
     return parser.parse_args()
 
 
@@ -347,13 +577,22 @@ async def main():
     print(f"🎯 Target URL: {args.url}")
     print(f"⏱️  Wait time: {args.wait} seconds")
     print(f"👁️  Headless mode: {args.headless}")
+    print(f"📄 Auto-paginate: {args.paginate}")
+    if args.paginate:
+        print(f"📊 Max pages: {args.max_pages}")
+        print(f"🔄 Navigation method: {args.nav_method}")
+    print(f"💾 Download now: {not args.no_download}")
     print()
     
     # Start interception
     await interceptor.intercept_website(
         url=args.url,
         wait_time=args.wait,
-        headless=args.headless
+        headless=args.headless,
+        auto_paginate=args.paginate,
+        max_pages=args.max_pages,
+        download_now=not args.no_download,
+        navigation_method=args.nav_method
     )
 
 
@@ -361,10 +600,14 @@ async def main():
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════════════╗
-║         Network PDF Interceptor & Auto-Downloader               ║
+║    Advanced Network PDF Interceptor & Auto-Downloader           ║
 ║                                                                  ║
-║  This tool intercepts all network requests from a website and    ║
-║  automatically downloads any PDFs detected (XHR, fetch, etc.)    ║
+║  Features:                                                       ║
+║  • Intercepts all network requests (XHR, fetch, etc.)            ║
+║  • Detects blob URLs and extracts PDF content                   ║
+║  • Auto-navigates pagination to collect all PDFs                ║
+║  • Saves all PDF links to a text file                           ║
+║  • Downloads PDFs automatically (optional)                       ║
 ╚══════════════════════════════════════════════════════════════════╝
     """)
     
