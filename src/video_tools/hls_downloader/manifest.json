@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "TLS HLS Catcher",
+  "version": "1.0",
+  "description": "Bắt link m3u8 ngầm (không cần mở F12) để tải video HLS.",
+  "permissions": [
+    "webRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

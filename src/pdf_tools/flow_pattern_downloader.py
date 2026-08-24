@@ -239,7 +239,7 @@ Examples:
     
     args = parser.parse_args()
     
-    downloader = AIVietnamPDFDownloader(save_path=args.save_path)
+    downloader = FlowPatternPDFDownloader(save_path=args.save_path)
     downloader.run(args.url, simulate_progress=args.simulate_progress, filename=args.output)
 
 
